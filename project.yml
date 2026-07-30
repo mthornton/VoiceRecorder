@@ -1,0 +1,50 @@
+name: VoiceRecorder
+
+options:
+  bundleIdPrefix: com.michaelthornton
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_EMIT_LOC_STRINGS: YES
+
+targets:
+  VoiceRecorder:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/VoiceRecorder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.michaelthornton.VoiceRecorder
+        PRODUCT_NAME: Voice Recorder
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: Sources/VoiceRecorder/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Recorder
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: >-
+          Voice Recorder needs the microphone to record audio that it transcribes
+          and summarizes for you.
+        NSSpeechRecognitionUsageDescription: >-
+          Voice Recorder transcribes your recordings on this device so you can
+          search and summarize them.
+        UIBackgroundModes:
+          - audio
+        ITSAppUsesNonExemptEncryption: false
