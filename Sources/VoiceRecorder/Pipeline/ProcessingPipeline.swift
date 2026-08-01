@@ -11,9 +11,12 @@ import SwiftData
 @MainActor
 @Observable
 final class ProcessingPipeline {
-    private let transcriber: TranscriptionProvider
     private let summarizer: SummarizationService
     private let settings: SettingsStore
+
+    /// Overrides provider selection in tests. Nil in the app, where the provider
+    /// is chosen per-run from current settings.
+    private let transcriberOverride: TranscriptionProvider?
 
     /// Recordings currently being worked on, so the UI can show per-row spinners
     /// and refuse to start a duplicate run.
@@ -21,16 +24,30 @@ final class ProcessingPipeline {
 
     init(
         settings: SettingsStore,
-        transcriber: TranscriptionProvider = OnDeviceTranscriber(),
+        transcriber: TranscriptionProvider? = nil,
         summarizer: SummarizationService = SummarizationService()
     ) {
         self.settings = settings
-        self.transcriber = transcriber
+        self.transcriberOverride = transcriber
         self.summarizer = summarizer
     }
 
     func isActive(_ recording: Recording) -> Bool {
         activeIDs.contains(recording.id)
+    }
+
+    /// Resolved at the start of each run rather than at init, so toggling the
+    /// setting takes effect on the next transcription without restarting.
+    private func makeTranscriber() -> TranscriptionProvider {
+        if let transcriberOverride { return transcriberOverride }
+
+        if settings.usesSpeakerAwareTranscription {
+            return SpeakerAwareTranscriber(
+                model: settings.transcriptionModelID,
+                apiKey: settings.apiKey
+            )
+        }
+        return OnDeviceTranscriber()
     }
 
     /// Runs whatever stages still need running. Called automatically when a
@@ -56,6 +73,25 @@ final class ProcessingPipeline {
         )
     }
 
+    /// Discards the existing transcript and runs the whole pipeline again with
+    /// the currently selected engine. Used to upgrade an on-device transcript to
+    /// a speaker-aware one, or to fall back the other way.
+    func retranscribe(_ recording: Recording, context: ModelContext) async {
+        guard !activeIDs.contains(recording.id) else { return }
+
+        recording.transcript = nil
+        recording.segmentsData = nil
+        recording.transcriptionEngineRaw = nil
+        // Segment indices only mean something against the segments they came
+        // from; a new transcription renumbers everything, so removals cannot
+        // carry over.
+        recording.excludedSegmentIndices = []
+        recording.summaryNeedsRefresh = false
+        save(context)
+
+        await process(recording, context: context)
+    }
+
     /// Re-runs only the summary, reusing the existing transcript.
     func resummarize(_ recording: Recording, template: SummaryTemplate, context: ModelContext) async {
         guard !activeIDs.contains(recording.id), recording.hasTranscript else { return }
@@ -66,6 +102,16 @@ final class ProcessingPipeline {
         await runSummarization(recording, template: template, context: context)
     }
 
+    /// Re-runs the summary with whatever template the recording already uses.
+    /// Called after the user edits the transcript.
+    func resummarize(_ recording: Recording, context: ModelContext) async {
+        await resummarize(
+            recording,
+            template: settings.template(withID: recording.templateID),
+            context: context
+        )
+    }
+
     // MARK: - Stages
 
     private func runTranscription(_ recording: Recording, context: ModelContext) async -> Bool {
@@ -73,9 +119,13 @@ final class ProcessingPipeline {
         recording.errorMessage = nil
         save(context)
 
+        let transcriber = makeTranscriber()
+
         do {
             let result = try await transcriber.transcribe(fileURL: recording.audioURL)
             recording.transcript = result.text
+            recording.segments = result.segments
+            recording.transcriptionEngineRaw = result.engine.rawValue
             recording.status = .transcribed
             recording.errorMessage = nil
             save(context)
@@ -93,7 +143,10 @@ final class ProcessingPipeline {
         template: SummaryTemplate,
         context: ModelContext
     ) async {
-        guard let transcript = recording.transcript, !transcript.isEmpty else { return }
+        // The effective transcript, so anything the user removed is genuinely
+        // absent from what the model sees.
+        let transcript = recording.effectiveTranscript
+        guard !transcript.isEmpty else { return }
 
         recording.status = .summarizing
         recording.errorMessage = nil
@@ -105,7 +158,8 @@ final class ProcessingPipeline {
                 template: template,
                 model: settings.modelID,
                 apiKey: settings.apiKey,
-                durationDescription: recording.formattedDuration
+                durationDescription: recording.formattedDuration,
+                hasSpeakerLabels: recording.hasSpeakerLabels
             )
 
             recording.summaryMarkdown = output.summary
@@ -121,6 +175,7 @@ final class ProcessingPipeline {
 
             recording.status = .complete
             recording.errorMessage = nil
+            recording.summaryNeedsRefresh = false
             save(context)
         } catch {
             recording.status = .summarizationFailed

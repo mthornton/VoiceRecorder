@@ -11,7 +11,6 @@ struct RecordingDetailView: View {
     @State private var player = AudioPlayer()
     @State private var isRenaming = false
     @State private var draftTitle = ""
-    @State private var showTranscript = false
 
     private var isWorking: Bool {
         pipeline.isActive(recording) || recording.status.isWorking
@@ -23,6 +22,7 @@ struct RecordingDetailView: View {
                 header
                 PlayerControls(player: player)
                 statusSection
+                staleSummaryBanner
                 summarySection
                 transcriptSection
             }
@@ -76,7 +76,9 @@ struct RecordingDetailView: View {
                     Text(recording.status.label)
                         .font(.subheadline.weight(.medium))
                     if recording.status == .transcribing {
-                        Text("Running on this device. The first run may download a speech model.")
+                        Text(settings.usesSpeakerAwareTranscription
+                             ? "Uploading audio to identify speakers. Long recordings are sent in parts, so this takes a few minutes."
+                             : "Running on this device. The first run may download a speech model.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -123,6 +125,32 @@ struct RecordingDetailView: View {
     }
 
     @ViewBuilder
+    private var staleSummaryBanner: some View {
+        // Shown rather than auto-regenerating: regeneration costs money, and
+        // silently spending it because the user tapped "Not Now" would be wrong.
+        if recording.summaryNeedsRefresh && recording.hasSummary && !isWorking {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Summary is out of date", systemImage: "clock.arrow.circlepath")
+                    .font(.subheadline.weight(.semibold))
+
+                Text("The transcript has changed since this summary was generated.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button("Regenerate Summary") {
+                    Task { await pipeline.resummarize(recording, context: context) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!settings.hasAPIKey)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(.yellow.opacity(0.12), in: .rect(cornerRadius: 12))
+        }
+    }
+
+    @ViewBuilder
     private var summarySection: some View {
         if recording.hasSummary {
             VStack(alignment: .leading, spacing: 16) {
@@ -154,6 +182,10 @@ struct RecordingDetailView: View {
                 Text("·")
                 Text(CuratedModel.name(forID: model))
             }
+            if let engine = recording.transcriptionEngine {
+                Text("·")
+                Text(engine.label)
+            }
         }
         .font(.caption2)
         .foregroundStyle(.tertiary)
@@ -163,25 +195,40 @@ struct RecordingDetailView: View {
     private var transcriptSection: some View {
         if recording.hasTranscript {
             VStack(alignment: .leading, spacing: 12) {
-                Button {
-                    withAnimation(.snappy) { showTranscript.toggle() }
-                } label: {
-                    HStack {
-                        sectionHeader("Transcript", systemImage: "text.alignleft")
-                        Spacer()
-                        Image(systemName: showTranscript ? "chevron.up" : "chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .buttonStyle(.plain)
+                sectionHeader("Transcript", systemImage: "text.alignleft")
 
-                if showTranscript {
-                    Text(recording.transcript ?? "")
-                        .font(.callout)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if recording.hasSpeakerLabels {
+                    let speakers = recording.distinctSpeakers
+                    Label(
+                        "\(speakers.count) speakers: \(speakers.joined(separator: ", "))",
+                        systemImage: "person.2.wave.2"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
+
+                if recording.removedSegmentCount > 0 {
+                    Label(
+                        "\(recording.removedSegmentCount) segment\(recording.removedSegmentCount == 1 ? "" : "s") removed",
+                        systemImage: "scissors"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Text(recording.effectiveTranscript)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                NavigationLink {
+                    TranscriptView(recording: recording)
+                } label: {
+                    Label("View Full Transcript", systemImage: "text.viewfinder")
+                        .font(.subheadline.weight(.medium))
+                }
+                .buttonStyle(.bordered)
             }
         }
     }
@@ -219,6 +266,20 @@ struct RecordingDetailView: View {
                     .disabled(isWorking || !settings.hasAPIKey)
                 }
 
+                if recording.hasTranscript {
+                    Button {
+                        retranscribe()
+                    } label: {
+                        Label(
+                            settings.usesSpeakerAwareTranscription
+                                ? "Re-transcribe with Speakers"
+                                : "Re-transcribe On-device",
+                            systemImage: "waveform.badge.magnifyingglass"
+                        )
+                    }
+                    .disabled(isWorking)
+                }
+
                 Divider()
 
                 ShareLink(item: recording.exportText()) {
@@ -241,6 +302,10 @@ struct RecordingDetailView: View {
 
     private func resummarize(with template: SummaryTemplate) {
         Task { await pipeline.resummarize(recording, template: template, context: context) }
+    }
+
+    private func retranscribe() {
+        Task { await pipeline.retranscribe(recording, context: context) }
     }
 }
 

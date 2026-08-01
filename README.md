@@ -1,10 +1,16 @@
 # Voice Recorder
 
-Record audio on iPhone, transcribe it on-device, and generate an AI summary.
+Record audio on iPhone, transcribe it, and generate an AI summary.
 
-Transcription runs entirely on the device using Apple's `SpeechAnalyzer` (iOS 26) — audio
-never leaves the phone. Only the resulting text is sent to OpenRouter for summarization,
-and only if you've added an API key.
+Transcription runs one of two ways, controlled by **Identify speakers** in Settings:
+
+- **On** (default) — audio is sent to an audio model via OpenRouter, which returns
+  speaker-attributed turns. Roughly a cent per hour. Your audio is uploaded.
+- **Off** — Apple's `SpeechAnalyzer` transcribes entirely on the device. Free and private,
+  but with no speaker labels; the on-device engine can't tell voices apart.
+
+Speaker labels are inferred by the model rather than produced by acoustic diarization, so
+they're reliable with a few clear speakers and less so with crosstalk or large groups.
 
 See [SPEC.md](SPEC.md) for the full v1 scope and what's deliberately out of it.
 
@@ -43,8 +49,18 @@ xcodebuild -project VoiceRecorder.xcodeproj -scheme VoiceRecorder -destination '
 Add your OpenRouter key under **Settings → OpenRouter API Key** and tap **Test Key** to
 confirm it works before relying on it. The key is stored in the device Keychain.
 
-Recording, transcription, playback, search, and export all work without a key — only
-summaries need one.
+Recording, on-device transcription, playback, search, and export all work without a key.
+Summaries and speaker labels need one — without a key, speaker-aware transcription falls
+back to on-device rather than failing.
+
+Open a recording and tap **View Full Transcript** to read it as speaker-attributed turns
+or as continuous plain text, with find-in-transcript in both modes.
+
+To cut something out of a transcript — crosstalk, a side conversation, anything you'd
+rather not feed to a summarizer — use **⋯ → Remove Parts** and tap the segments to drop.
+Removal is reversible: the text is kept and can be restored, and the audio is never
+touched. Once you're done, the app offers to regenerate the summary from the edited
+transcript, and flags the existing summary as out of date until you do.
 
 ## Layout
 
@@ -59,13 +75,16 @@ Sources/VoiceRecorder/
   Views/            SwiftUI screens
 ```
 
-The `TranscriptionProvider` protocol in `Transcription/` is the seam for adding a cloud
-speech-to-text provider later — which is also what speaker labels would require, since
-Apple's on-device engine returns a single undifferentiated stream.
+The `TranscriptionProvider` protocol in `Transcription/` is the seam between the two
+engines. Adding a dedicated STT service with true acoustic diarization (Deepgram,
+AssemblyAI) means writing one more conformance and nothing else.
 
 ## Notes
 
-- The first transcription downloads a speech model for your locale (a few hundred MB).
+- The first on-device transcription downloads a speech model for your locale (a few
+  hundred MB).
+- Speaker-aware transcription re-encodes audio to 16 kHz mono before upload and sends long
+  recordings in 15-minute chunks, so an hour is four sequential requests.
 - Recording continues while the app is backgrounded or the screen is locked, and
   auto-pauses for calls and Siri.
 - Audio is written progressively, so a crash mid-recording leaves a playable file.

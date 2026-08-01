@@ -22,6 +22,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 apiKeySection
+                transcriptionSection
                 modelSection
                 templateSection
                 aboutSection
@@ -83,7 +84,7 @@ struct SettingsView: View {
         } header: {
             Text("OpenRouter API Key")
         } footer: {
-            Text("Stored in the device Keychain. Recording, transcription, and search all work without a key — only summaries need one. Get a key at openrouter.ai/keys.")
+            Text("Stored in the device Keychain. Recording, on-device transcription, playback, and search all work without a key. Summaries and speaker labels need one. Get a key at openrouter.ai/keys.")
         }
     }
 
@@ -109,6 +110,46 @@ struct SettingsView: View {
             Label(message, systemImage: "xmark.circle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
+        }
+    }
+
+    // MARK: - Transcription
+
+    private var transcriptionSection: some View {
+        @Bindable var settings = settings
+
+        return Section {
+            Toggle("Identify speakers", isOn: $settings.speakerAwareTranscription)
+
+            if settings.speakerAwareTranscription {
+                Picker("Transcription model", selection: $settings.transcriptionModelID) {
+                    ForEach(CuratedTranscriptionModel.all) { model in
+                        VStack(alignment: .leading) {
+                            Text(model.name)
+                            Text(model.note).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(model.id)
+                    }
+                }
+                .pickerStyle(.navigationLink)
+
+                if !settings.hasAPIKey {
+                    Label(
+                        "Needs an API key. Until you add one, recordings transcribe on-device without speaker labels.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            }
+        } header: {
+            Text("Transcription")
+        } footer: {
+            // This is the one setting that changes what leaves the device, so it
+            // says so plainly rather than in an About section nobody opens.
+            Text(settings.speakerAwareTranscription
+                 ? "Your audio is uploaded to OpenRouter to identify who is speaking, at roughly a cent per hour. Speaker labels are inferred from the audio, so they're good with a few clear speakers and less reliable with crosstalk or large groups.\n\nTurn this off to transcribe entirely on this device, free and private, with no speaker labels."
+                 : "Recordings are transcribed on this device. Audio never leaves your phone, and there's no cost. Apple's on-device engine can't tell speakers apart.")
         }
     }
 
@@ -196,13 +237,18 @@ struct SettingsView: View {
     }
 
     private var aboutSection: some View {
-        Section {
-            LabeledContent("Transcription", value: "On-device")
-            LabeledContent("Speaker labels", value: "Not available")
+        let speakerAware = settings.usesSpeakerAwareTranscription
+
+        return Section {
+            LabeledContent("Transcription", value: speakerAware ? "OpenRouter" : "On-device")
+            LabeledContent("Speaker labels", value: speakerAware ? "Enabled" : "Not available")
+            LabeledContent("Audio leaves device", value: speakerAware ? "Yes" : "No")
         } header: {
             Text("About")
         } footer: {
-            Text("Audio is transcribed on this device and never uploaded. Only the resulting text is sent to OpenRouter for summarization. Apple's on-device engine does not distinguish between speakers.")
+            Text(speakerAware
+                 ? "Audio is uploaded for transcription, and the resulting text is sent to OpenRouter again for summarization."
+                 : "Audio is transcribed on this device and never uploaded. Only the resulting text is sent to OpenRouter for summarization.")
         }
     }
 

@@ -13,9 +13,31 @@ struct TranscriptSegment: Sendable, Codable, Hashable {
     var speaker: String?
 }
 
+/// Which engine produced a transcript.
+///
+/// Recorded per-recording rather than read from current settings, because the
+/// setting can change after the fact and the UI must not claim a transcript has
+/// speaker labels when the engine that produced it couldn't generate them.
+enum TranscriptionEngine: String, Codable, Sendable, CaseIterable {
+    case onDevice
+    case cloudSpeakerAware
+
+    var label: String {
+        switch self {
+        case .onDevice: return "On-device"
+        case .cloudSpeakerAware: return "Speaker-aware"
+        }
+    }
+
+    var producesSpeakerLabels: Bool {
+        self == .cloudSpeakerAware
+    }
+}
+
 struct TranscriptionResult: Sendable {
     var text: String
     var segments: [TranscriptSegment]
+    var engine: TranscriptionEngine
 }
 
 enum TranscriptionError: LocalizedError {
@@ -41,14 +63,15 @@ enum TranscriptionError: LocalizedError {
     }
 }
 
-/// The seam that keeps a cloud transcription provider a drop-in addition.
+/// The seam that keeps transcription engines interchangeable.
 ///
-/// v1 ships exactly one conformance, `OnDeviceTranscriber`. A cloud provider
-/// (and with it, speaker labels) is deliberately out of scope — but everything
-/// downstream of this protocol is already written against the abstraction.
+/// Two conformances: `OnDeviceTranscriber` (free, private, no speaker labels)
+/// and `SpeakerAwareTranscriber` (uploads audio, returns speaker-attributed
+/// turns). `ProcessingPipeline` picks between them from settings.
 protocol TranscriptionProvider: Sendable {
     var displayName: String { get }
     var supportsSpeakerLabels: Bool { get }
+    var engine: TranscriptionEngine { get }
 
     func transcribe(fileURL: URL) async throws -> TranscriptionResult
 }

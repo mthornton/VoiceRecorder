@@ -55,7 +55,9 @@ struct LibraryView: View {
 
         return recordings.filter { recording in
             recording.title.localizedStandardContains(query)
-                || (recording.transcript ?? "").localizedStandardContains(query)
+                // Effective, not raw: text the user removed shouldn't surface a
+                // recording in search results.
+                || recording.effectiveTranscript.localizedStandardContains(query)
                 || (recording.summaryMarkdown ?? "").localizedStandardContains(query)
                 || recording.keyPoints.contains { $0.localizedStandardContains(query) }
                 || recording.actionItems.contains { $0.localizedStandardContains(query) }

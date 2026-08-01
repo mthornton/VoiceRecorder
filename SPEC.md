@@ -51,12 +51,42 @@ Rules:
 
 ## Transcription
 
-- On-device via `SpeechAnalyzer`, which is built for long-form audio.
-- Runs automatically when the user stops recording.
-- Free, offline, and private — no audio leaves the device on this path.
-- **No speaker labels.** Apple's on-device engine returns a single undifferentiated text
-  stream. Diarization requires a cloud provider and is out of scope for v1; the
-  `TranscriptionProvider` seam is what makes adding it later cheap.
+Two engines behind `TranscriptionProvider`, selected by the **Identify speakers** setting.
+The engine that actually ran is recorded on each recording, because the setting can change
+afterwards and the UI must not claim speaker labels a transcript doesn't have.
+
+### On-device (`OnDeviceTranscriber`)
+
+- Apple `SpeechAnalyzer`, built for long-form audio.
+- Free, offline, private — no audio leaves the device.
+- **No speaker labels.** The engine returns a single undifferentiated stream.
+- Used whenever the setting is off, or when it's on but no API key is configured.
+
+### Speaker-aware (`SpeakerAwareTranscriber`)
+
+- Sends audio to an audio-capable model via OpenRouter (default
+  `google/gemini-2.5-flash`), which returns speaker-attributed turns.
+- **This is inference, not acoustic diarization.** The model distinguishes speakers from
+  voice characteristics and conversational cues rather than clustering voice embeddings
+  the way a dedicated STT service does. Good with a few clearly-alternating speakers;
+  degrades with crosstalk, similar voices, or large groups.
+- ~1¢ per hour, versus ~26¢ for Deepgram — the tradeoff bought for that price is accuracy
+  on hard audio, and one API key instead of two.
+- **Audio is uploaded.** This is the only setting that changes what leaves the device, and
+  the UI says so directly rather than burying it.
+
+### Upload preparation (`AudioTranscoder`)
+
+Audio must be base64-inlined in the request body, which inflates it ~33%. Recordings are
+re-encoded to 16 kHz mono at 24 kbps (2.6× smaller, verified) and split into 15-minute
+chunks, giving request bodies of roughly 2.4 MB. An hour is four chunks.
+
+Chunks are sent sequentially, not concurrently: each is told which speakers earlier chunks
+established so labels stay consistent across seams instead of renumbering.
+
+Segment timings on this path are approximate — turns are distributed across a chunk's span
+in proportion to length, since the model doesn't return reliable timestamps. Accurate
+enough for ordering, not for seeking, which is why the transcript view has no tap-to-seek.
 
 ## Summarization
 
@@ -91,6 +121,45 @@ Plus a **Custom** template with a user-editable prompt, editable in Settings.
 - Rename, delete.
 - **Export / share sheet**: audio file, transcript as plain text, summary as Markdown.
 
+### Transcript view
+
+A dedicated screen, reached from the detail view, with two modes:
+
+- **Speakers** — colour-coded turns, consecutive same-speaker segments merged, with a
+  legend of everyone in the recording. Only offered when the transcript actually has more
+  than one speaker.
+- **Plain text** — continuous text, for copying, reading a monologue, or checking what the
+  summarizer actually saw.
+
+Both support find-in-transcript with match highlighting. The footer states which engine
+produced the transcript and, for the speaker-aware path, warns that labels are inferred.
+
+### Removing parts of a transcript
+
+An edit mode lets the user strike segments out of the transcript — crosstalk, a side
+conversation, someone reading a password aloud.
+
+- **Reversible, never destructive.** Removed segments are flagged by index in
+  `excludedSegmentIndices`; the text stays on disk and can be restored individually or all
+  at once. The audio file is never modified.
+- **Per-segment granularity**, which is finer than the merged turns shown in reading mode.
+  Removing part of a single segment is not supported.
+- `effectiveTranscript` rebuilds the text from the kept segments and is what
+  **summarization, search, and export** all consume. `transcript` holds the untouched
+  original purely to rebuild from.
+- Export discloses that segments were removed, so an edited transcript doesn't read as a
+  complete record of what was said.
+- A speaker whose every segment is removed drops out of the legend; speaker colours stay
+  keyed to the full roster so they don't shift as things are removed.
+- Re-transcribing clears removals, since segment indices are meaningless against a
+  different set of segments.
+
+After an edit, the app **offers** to regenerate the summary rather than doing it
+automatically — regeneration costs money, and spending it because a user declined the
+prompt would be wrong. Declining leaves a persistent "Summary is out of date" banner on
+the detail view, tracked by `summaryNeedsRefresh` and cleared on the next successful
+summarization.
+
 ## Settings
 
 - **OpenRouter API key**, stored in the **Keychain** (never `UserDefaults`, never logged).
@@ -117,7 +186,9 @@ mid-tier model. Transcription is free (on-device).
 ## Explicitly out of scope for v1
 
 - **Apple Watch app** — deferred to a future version.
-- Cloud STT and speaker labels (protocol seam only).
+- Dedicated STT providers with true acoustic diarization (Deepgram, AssemblyAI). The
+  `TranscriptionProvider` seam is what would make adding one cheap if inferred speaker
+  labels prove insufficient.
 - Chat / follow-up Q&A against a transcript.
 - iCloud sync — storage is local-only.
 - Tags and folders.

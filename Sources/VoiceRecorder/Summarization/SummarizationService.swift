@@ -21,12 +21,27 @@ struct SummarizationService: Sendable {
         template: SummaryTemplate,
         model: String,
         apiKey: String,
-        durationDescription: String
+        durationDescription: String,
+        hasSpeakerLabels: Bool = false
     ) async throws -> SummaryOutput {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw OpenRouterError.emptyResponse
         }
+
+        // Speaker attribution changes what the model can legitimately claim: with
+        // labels it can say who committed to what, without them it must not.
+        let speakerGuidance = hasSpeakerLabels
+            ? """
+            Turns are prefixed with speaker labels. Attribute statements and
+            commitments to the right speaker. The labels themselves come from
+            automatic attribution and can occasionally be wrong, so don't build
+            conclusions on a single borderline turn.
+            """
+            : """
+            The transcript has no speaker labels. Infer speaker changes from
+            context where it helps, but do not assert who said what.
+            """
 
         let system = """
         You summarize transcribed audio recordings.
@@ -34,10 +49,11 @@ struct SummarizationService: Sendable {
         \(template.prompt)
 
         The transcript comes from automatic speech recognition, so expect
-        mis-heard words, missing punctuation, and no speaker labels. Infer
-        speaker changes from context where it helps, but never invent content
-        that isn't supported by the transcript. If the audio is too short or too
-        garbled to summarize meaningfully, say that plainly instead of padding.
+        mis-heard words and imperfect punctuation. \(speakerGuidance)
+
+        Never invent content that isn't supported by the transcript. If the audio
+        is too short or too garbled to summarize meaningfully, say that plainly
+        instead of padding.
 
         Respond with a single JSON object and nothing else — no prose before or
         after, no markdown code fences. Use exactly these keys:

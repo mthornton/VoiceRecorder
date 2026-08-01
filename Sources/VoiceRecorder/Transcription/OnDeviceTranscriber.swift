@@ -12,6 +12,8 @@ final class OnDeviceTranscriber: TranscriptionProvider {
     /// Apple's engine returns one undifferentiated stream — no diarization.
     let supportsSpeakerLabels = false
 
+    let engine = TranscriptionEngine.onDevice
+
     func transcribe(fileURL: URL) async throws -> TranscriptionResult {
         guard SpeechTranscriber.isAvailable else {
             throw TranscriptionError.unavailableOnThisDevice
@@ -60,16 +62,13 @@ final class OnDeviceTranscriber: TranscriptionProvider {
         }
 
         let segments = try await collector.value
-        let text = segments
-            .map(\.text)
-            .joined()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = TranscriptComposer.compose(segments)
 
         guard !text.isEmpty else {
             throw TranscriptionError.producedNoText
         }
 
-        return TranscriptionResult(text: text, segments: segments)
+        return TranscriptionResult(text: text, segments: segments, engine: engine)
     }
 
     // MARK: - Locale

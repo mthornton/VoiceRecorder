@@ -40,6 +40,47 @@ struct CuratedModel: Identifiable, Hashable {
     }
 }
 
+/// Models that accept audio input, for speaker-aware transcription.
+///
+/// Only a subset of OpenRouter's catalog takes audio at all, so this is a
+/// separate list from the summarization models — picking a text-only model here
+/// would fail every transcription. Ids verified against `/api/v1/models`
+/// filtered by `input_modalities` containing `audio`.
+struct CuratedTranscriptionModel: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let note: String
+
+    static let all: [CuratedTranscriptionModel] = [
+        CuratedTranscriptionModel(
+            id: "google/gemini-2.5-flash",
+            name: "Gemini 2.5 Flash",
+            note: "Roughly a cent per hour. Good default."
+        ),
+        CuratedTranscriptionModel(
+            id: "google/gemini-2.5-flash-lite",
+            name: "Gemini 2.5 Flash Lite",
+            note: "Cheapest. Weaker on difficult audio."
+        ),
+        CuratedTranscriptionModel(
+            id: "google/gemini-2.5-pro",
+            name: "Gemini 2.5 Pro",
+            note: "Best with crosstalk and many speakers."
+        ),
+        CuratedTranscriptionModel(
+            id: "openai/gpt-audio-mini",
+            name: "GPT Audio Mini",
+            note: "Alternative if Gemini struggles."
+        ),
+    ]
+
+    static let defaultID = "google/gemini-2.5-flash"
+
+    static func name(forID id: String) -> String {
+        all.first { $0.id == id }?.name ?? id
+    }
+}
+
 enum OpenRouterError: LocalizedError {
     case missingKey
     case invalidKey
@@ -105,20 +146,75 @@ struct OpenRouterClient: Sendable {
         apiKey: String,
         maxTokens: Int = 4096
     ) async throws -> String {
+        try await send(
+            model: model,
+            messages: messages.map { ["role": $0.role, "content": $0.content] },
+            apiKey: apiKey,
+            maxTokens: maxTokens,
+            timeout: 180
+        )
+    }
+
+    /// Sends audio alongside a text instruction, for models that accept audio
+    /// input. Used for speaker-aware transcription.
+    ///
+    /// OpenRouter takes audio as base64 inline in the request body — there is no
+    /// URL or upload endpoint — which is why callers must downsample and chunk
+    /// before getting here.
+    func completeWithAudio(
+        model: String,
+        systemPrompt: String,
+        userPrompt: String,
+        audio: Data,
+        audioFormat: String,
+        apiKey: String,
+        maxTokens: Int = 16_384
+    ) async throws -> String {
+        let content: [[String: Any]] = [
+            ["type": "text", "text": userPrompt],
+            [
+                "type": "input_audio",
+                "input_audio": [
+                    "data": audio.base64EncodedString(),
+                    "format": audioFormat,
+                ],
+            ],
+        ]
+
+        return try await send(
+            model: model,
+            messages: [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": content],
+            ],
+            apiKey: apiKey,
+            maxTokens: maxTokens,
+            // Uploading and transcribing a 15-minute chunk is slow; this is
+            // generous on purpose so a normal run doesn't get killed mid-flight.
+            timeout: 600
+        )
+    }
+
+    private func send(
+        model: String,
+        messages: [[String: Any]],
+        apiKey: String,
+        maxTokens: Int,
+        timeout: TimeInterval
+    ) async throws -> String {
         guard !apiKey.isEmpty else { throw OpenRouterError.missingKey }
 
         var request = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         applyHeaders(to: &request, apiKey: apiKey)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // An hour of audio can take a while to summarize on a slow model.
-        request.timeoutInterval = 180
+        request.timeoutInterval = timeout
 
         let body: [String: Any] = [
             "model": model,
-            "messages": messages.map { ["role": $0.role, "content": $0.content] },
+            "messages": messages,
             "max_tokens": maxTokens,
-            "temperature": 0.3,
+            "temperature": 0.2,
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
