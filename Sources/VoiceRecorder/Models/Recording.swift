@@ -70,17 +70,20 @@ final class Recording {
     /// setting is not evidence of what actually ran.
     var transcriptionEngineRaw: String?
 
-    /// Positions in `segments` the user has removed.
-    ///
-    /// Exclusion is reversible by design: the segment text stays on disk so it
-    /// can be restored, and the audio is never modified. Indices are stable
-    /// because `segments` is written once by transcription and not mutated
-    /// afterwards — re-transcribing clears this along with the transcript.
-    var excludedSegmentIndices: [Int] = []
+    /// How much to trust segment times. Nil falls back to what the engine
+    /// implies. Cutting audio is refused unless this is safe — see
+    /// `SegmentTimingSource`.
+    var timingSourceRaw: String?
 
-    /// Set when exclusions change after a summary already exists, so the UI can
-    /// say the summary no longer reflects the transcript rather than presenting
-    /// a stale one as current.
+    /// Running tally of what redaction has destroyed, kept so the UI and
+    /// exports can disclose that the recording is no longer complete. The
+    /// removed content itself is gone; only these counts remain.
+    var redactedSegmentCount: Int = 0
+    var redactedDuration: TimeInterval = 0
+
+    /// Set when the transcript changes after a summary already exists, so the
+    /// UI can say the summary no longer reflects the transcript rather than
+    /// presenting a stale one as current.
     var summaryNeedsRefresh: Bool = false
 
     var summaryMarkdown: String?
@@ -143,60 +146,39 @@ extension Recording {
         distinctSpeakers.count > 1
     }
 
-    /// Speakers still present after removals — a speaker whose every segment was
-    /// removed shouldn't linger in the legend.
     var distinctSpeakers: [String] {
         var seen: [String] = []
-        for speaker in includedSegments.compactMap(\.speaker) where !seen.contains(speaker) {
+        for speaker in segments.compactMap(\.speaker) where !seen.contains(speaker) {
             seen.append(speaker)
         }
         return seen
     }
 
-    // MARK: - Removal
+    // MARK: - Redaction
 
-    var excludedIndexSet: Set<Int> {
-        Set(excludedSegmentIndices)
-    }
-
-    var hasExclusions: Bool {
-        !excludedSegmentIndices.isEmpty
-    }
-
-    /// Segments the user has kept, in original order.
-    var includedSegments: [TranscriptSegment] {
-        let excluded = excludedIndexSet
-        return segments.enumerated()
-            .filter { !excluded.contains($0.offset) }
-            .map(\.element)
-    }
-
-    var removedSegmentCount: Int {
-        // Guards against a stale index surviving a shorter re-transcription.
-        excludedIndexSet.filter { $0 < segments.count }.count
-    }
-
-    /// The transcript as it currently stands, with removals applied. This is
-    /// what summarization, search, and export all consume — `transcript` is the
-    /// untouched original and is only used to rebuild from.
-    var effectiveTranscript: String {
-        guard hasExclusions else { return transcript ?? "" }
-        let composed = TranscriptComposer.compose(includedSegments)
-        // If segments are somehow unavailable, fall back to the original rather
-        // than silently handing an empty transcript to the summarizer.
-        return composed.isEmpty ? (transcript ?? "") : composed
-    }
-
-    /// Applies a new exclusion set, flagging the summary as stale only if one
-    /// exists and the selection actually changed.
-    func applyExclusions(_ indices: Set<Int>) {
-        let normalized = indices.filter { $0 >= 0 && $0 < segments.count }.sorted()
-        guard normalized != excludedSegmentIndices.sorted() else { return }
-
-        excludedSegmentIndices = normalized
-        if hasSummary {
-            summaryNeedsRefresh = true
+    /// Falls back to what the engine implies when nothing was recorded, so a
+    /// transcript made before timing provenance existed is treated as an
+    /// estimate on the cloud path rather than being trusted by default.
+    var timingSource: SegmentTimingSource {
+        if let raw = timingSourceRaw, let source = SegmentTimingSource(rawValue: raw) {
+            return source
         }
+        return transcriptionEngine == .cloudSpeakerAware ? .estimated : .exact
+    }
+
+    var hasRedactions: Bool {
+        redactedSegmentCount > 0
+    }
+
+    /// Segments can only be cut out of the audio if their timings are
+    /// trustworthy. When they aren't, alignment has to run first.
+    var needsAlignmentBeforeRedaction: Bool {
+        !timingSource.isSafeForCutting
+    }
+
+    var formattedRedactedDuration: String {
+        let total = Int(redactedDuration.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     var hasSummary: Bool {
@@ -236,16 +218,16 @@ extension Recording {
             parts.append(contentsOf: actionItems.map { "- [ ] \($0)" })
             parts.append("")
         }
-        let body = effectiveTranscript
-        if !body.isEmpty {
+        if let transcript, !transcript.isEmpty {
             parts.append("## Transcript")
-            if removedSegmentCount > 0 {
+            if hasRedactions {
                 // Say so rather than exporting an edited transcript that reads
                 // as a complete record of what was said.
-                parts.append("_\(removedSegmentCount) segment\(removedSegmentCount == 1 ? "" : "s") removed by the user._")
+                parts.append("_\(redactedSegmentCount) segment\(redactedSegmentCount == 1 ? "" : "s") "
+                    + "(\(formattedRedactedDuration)) permanently removed by the user._")
                 parts.append("")
             }
-            parts.append(body)
+            parts.append(transcript)
         }
         return parts.joined(separator: "\n")
     }

@@ -16,6 +16,15 @@ final class AudioPlayer {
     private var delegate: PlayerDelegate?
     private var loadedURL: URL?
 
+    /// Discards any cached player and loads the file again.
+    ///
+    /// Needed after redaction: the URL is unchanged but the file behind it has
+    /// been rewritten, so `load` alone would keep playing the stale duration.
+    func reload(url: URL) {
+        stop()
+        load(url: url)
+    }
+
     func load(url: URL) {
         guard loadedURL != url else { return }
         stop()

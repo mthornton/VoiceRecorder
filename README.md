@@ -56,11 +56,21 @@ back to on-device rather than failing.
 Open a recording and tap **View Full Transcript** to read it as speaker-attributed turns
 or as continuous plain text, with find-in-transcript in both modes.
 
-To cut something out of a transcript — crosstalk, a side conversation, anything you'd
-rather not feed to a summarizer — use **⋯ → Remove Parts** and tap the segments to drop.
-Removal is reversible: the text is kept and can be restored, and the audio is never
-touched. Once you're done, the app offers to regenerate the summary from the edited
-transcript, and flags the existing summary as out of date until you do.
+To remove something sensitive — a password read aloud, a side conversation — use
+**⋯ → Remove Parts** and tap the segments to drop.
+
+**This is permanent.** The selected text is deleted from the transcript *and* cut out of
+the audio file, which is overwritten in place. There is no undo and no backup copy. You'll
+get a confirmation naming how much audio will be cut before anything happens.
+
+On speaker-aware transcripts the app first re-listens to the recording on-device to work
+out exactly where those words are, because the speaker-aware timings are only estimates
+and cutting on an estimate would leave the sensitive audio in the file. That adds a minute
+or two on a long recording. If it can't confidently locate the words, it removes nothing
+and tells you.
+
+Afterwards the app offers to regenerate the summary, and flags the existing one as out of
+date until you do.
 
 ## Layout
 
@@ -85,6 +95,8 @@ AssemblyAI) means writing one more conformance and nothing else.
   hundred MB).
 - Speaker-aware transcription re-encodes audio to 16 kHz mono before upload and sends long
   recordings in 15-minute chunks, so an hour is four sequential requests.
+- Redaction pads each cut by 200 ms on both sides. It deliberately errs toward removing a
+  little too much rather than too little.
 - Recording continues while the app is backgrounded or the screen is locked, and
   auto-pauses for calls and Siri.
 - Audio is written progressively, so a crash mid-recording leaves a playable file.

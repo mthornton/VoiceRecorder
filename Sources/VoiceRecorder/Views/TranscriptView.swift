@@ -2,24 +2,25 @@ import SwiftData
 import SwiftUI
 
 /// Full transcript, with speaker-attributed or continuous presentation, and an
-/// edit mode for removing parts of it.
+/// edit mode for permanently removing parts of it.
 ///
-/// Removal operates on individual segments rather than the merged turns shown in
-/// reading mode, so the user gets finer control than the display granularity
-/// suggests. Nothing is destroyed — removed segments are flagged, can be
-/// reviewed and restored, and the audio is untouched.
+/// Removal here is redaction, not hiding: selected segments are deleted from the
+/// transcript *and* cut out of the audio file. It exists so sensitive content
+/// stops existing, so there is no undo and the UI says so before acting.
 struct TranscriptView: View {
     @Bindable var recording: Recording
 
     @Environment(ProcessingPipeline.self) private var pipeline
+    @Environment(RedactionService.self) private var redaction
     @Environment(\.modelContext) private var context
 
     @State private var mode: Mode = .speakers
     @State private var searchText = ""
     @State private var isEditing = false
     @State private var selection: Set<Int> = []
-    @State private var showRemoved = false
+    @State private var confirmRedaction = false
     @State private var askToResummarize = false
+    @State private var errorMessage: String?
 
     enum Mode: String, CaseIterable, Identifiable {
         case speakers = "Speakers"
@@ -48,8 +49,8 @@ struct TranscriptView: View {
 
                         speakerLegend
                     }
-                    if recording.removedSegmentCount > 0 {
-                        removedNotice
+                    if recording.hasRedactions {
+                        redactionNotice
                     }
                 }
 
@@ -75,6 +76,13 @@ struct TranscriptView: View {
         .safeAreaInset(edge: .bottom) {
             if isEditing { editingActionBar }
         }
+        .overlay { if redaction.isWorking { workingOverlay } }
+        .alert("Remove permanently?", isPresented: $confirmRedaction) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove", role: .destructive) { performRedaction() }
+        } message: {
+            Text(confirmationMessage)
+        }
         .alert("Regenerate summary?", isPresented: $askToResummarize) {
             Button("Not Now", role: .cancel) {}
             Button("Regenerate") {
@@ -82,6 +90,14 @@ struct TranscriptView: View {
             }
         } message: {
             Text("The transcript changed, so the current summary is out of date. Regenerating uses the edited transcript.")
+        }
+        .alert(
+            "Couldn't remove that",
+            isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
         }
     }
 
@@ -97,35 +113,29 @@ struct TranscriptView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Done") { commitEdits() }
+                Button("Remove") { confirmRedaction = true }
                     .fontWeight(.semibold)
+                    .disabled(selection.isEmpty)
             }
         } else {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if canEdit {
-                        Button {
-                            selection = recording.excludedIndexSet
-                            showRemoved = true
+                        Button(role: .destructive) {
+                            selection = []
                             isEditing = true
                         } label: {
                             Label("Remove Parts", systemImage: "scissors")
                         }
                     }
-                    if recording.removedSegmentCount > 0 {
-                        Button {
-                            restoreAll()
-                        } label: {
-                            Label("Restore All Removed", systemImage: "arrow.uturn.backward")
-                        }
-                    }
                     Divider()
-                    ShareLink(item: shareableText) {
+                    ShareLink(item: recording.transcript ?? "") {
                         Label("Share Transcript", systemImage: "square.and.arrow.up")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .disabled(redaction.isWorking)
             }
         }
     }
@@ -133,30 +143,41 @@ struct TranscriptView: View {
     // MARK: - Edit mode
 
     private var editingBanner: some View {
-        Label(
-            "Tap segments to remove them from the transcript. The audio isn't changed, and you can restore them later.",
-            systemImage: "info.circle"
-        )
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Label(
+                "Selected segments are deleted from the transcript and cut out of the audio. This can't be undone.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+
+            if recording.needsAlignmentBeforeRedaction {
+                // Worth saying up front: this transcript's timings are estimates,
+                // so the app has to re-listen to the audio before it can cut
+                // accurately, and that takes a while on a long recording.
+                Text("This recording needs a pass to locate the words in the audio first, so removal will take a minute or two.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 12))
+        .background(.orange.opacity(0.1), in: .rect(cornerRadius: 12))
     }
 
     private var editableSegments: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(editableIndices, id: \.self) { index in
                 let segment = recording.segments[index]
-                let isRemoved = selection.contains(index)
+                let isSelected = selection.contains(index)
 
                 Button {
-                    if isRemoved { selection.remove(index) } else { selection.insert(index) }
+                    if isSelected { selection.remove(index) } else { selection.insert(index) }
                 } label: {
                     HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: isRemoved ? "minus.circle.fill" : "circle")
+                        Image(systemName: isSelected ? "minus.circle.fill" : "circle")
                             .font(.title3)
-                            .foregroundStyle(isRemoved ? Color.red : Color.secondary)
+                            .foregroundStyle(isSelected ? Color.red : Color.secondary)
 
                         VStack(alignment: .leading, spacing: 4) {
                             if let speaker = segment.speaker {
@@ -166,15 +187,15 @@ struct TranscriptView: View {
                             }
                             Text(segment.text)
                                 .font(.callout)
-                                .foregroundStyle(isRemoved ? .secondary : .primary)
-                                .strikethrough(isRemoved, color: .red.opacity(0.6))
+                                .foregroundStyle(isSelected ? .secondary : .primary)
+                                .strikethrough(isSelected, color: .red.opacity(0.6))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .multilineTextAlignment(.leading)
                         }
                     }
                     .padding(12)
                     .background(
-                        isRemoved ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06),
+                        isSelected ? Color.red.opacity(0.08) : Color.secondary.opacity(0.06),
                         in: .rect(cornerRadius: 10)
                     )
                 }
@@ -183,15 +204,13 @@ struct TranscriptView: View {
         }
     }
 
-    private var editableActionCount: Int { selection.count }
-
     private var editingActionBar: some View {
         VStack(spacing: 8) {
             Divider()
             HStack {
-                Text(editableActionCount == 0
-                     ? "Nothing removed"
-                     : "\(editableActionCount) segment\(editableActionCount == 1 ? "" : "s") removed")
+                Text(selection.isEmpty
+                     ? "Select segments to remove"
+                     : "\(selection.count) selected · about \(formatted(selectedDuration)) of audio")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -206,44 +225,80 @@ struct TranscriptView: View {
         .background(.bar)
     }
 
-    /// In edit mode the search filters which segments are listed, so a long
-    /// transcript can be narrowed before selecting.
     private var editableIndices: [Int] {
         let all = Array(recording.segments.indices)
         guard !searchText.isEmpty else { return all }
         return all.filter { recording.segments[$0].text.localizedStandardContains(searchText) }
     }
 
-    private func commitEdits() {
-        let changed = selection != recording.excludedIndexSet
-        recording.applyExclusions(selection)
-        try? context.save()
-        isEditing = false
+    /// Approximate by nature: on an unaligned transcript these are the estimated
+    /// spans, which is why it's presented as "about" rather than a promise.
+    private var selectedDuration: TimeInterval {
+        selection
+            .filter { $0 < recording.segments.count }
+            .reduce(0) { total, index in
+                let segment = recording.segments[index]
+                return total + max(segment.end - segment.start, 0)
+            }
+    }
 
-        if changed && recording.hasSummary {
-            askToResummarize = true
+    private var confirmationMessage: String {
+        let count = selection.count
+        return """
+        \(count) segment\(count == 1 ? "" : "s") — about \(formatted(selectedDuration)) of audio — will be \
+        deleted from the transcript and cut out of the recording.
+
+        The audio file is overwritten. There is no undo and no backup copy.
+        """
+    }
+
+    private var workingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.25).ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                Text(redaction.phase.message ?? "Working…")
+                    .font(.subheadline)
+                Text("Don't close the app")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .background(.regularMaterial, in: .rect(cornerRadius: 16))
         }
     }
 
-    private func restoreAll() {
-        recording.applyExclusions([])
-        try? context.save()
-        if recording.hasSummary {
-            askToResummarize = true
+    private func performRedaction() {
+        let indices = selection
+        isEditing = false
+        selection = []
+
+        Task {
+            do {
+                try await redaction.redact(recording, indices: indices, context: context)
+                if recording.hasSummary {
+                    askToResummarize = true
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
         }
+    }
+
+    private func formatted(_ interval: TimeInterval) -> String {
+        let total = Int(interval.rounded())
+        if total < 60 { return "\(total)s" }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     // MARK: - Reading mode
 
-    private var removedNotice: some View {
+    private var redactionNotice: some View {
         HStack(spacing: 8) {
             Image(systemName: "scissors")
-            Text("\(recording.removedSegmentCount) segment\(recording.removedSegmentCount == 1 ? "" : "s") removed")
+            Text("\(recording.redactedSegmentCount) segment\(recording.redactedSegmentCount == 1 ? "" : "s") "
+                 + "(\(recording.formattedRedactedDuration)) permanently removed")
             Spacer()
-            Button(showRemoved ? "Hide" : "Show") {
-                withAnimation(.snappy) { showRemoved.toggle() }
-            }
-            .font(.caption.weight(.semibold))
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -281,17 +336,10 @@ struct TranscriptView: View {
                         Text(turn.speaker)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(color(for: turn.speaker))
-                        if turn.removed {
-                            Text("removed")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.red)
-                        }
                     }
 
                     Text(highlighted(turn.text))
                         .font(.body)
-                        .foregroundStyle(turn.removed ? .secondary : .primary)
-                        .strikethrough(turn.removed, color: .red.opacity(0.5))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -299,22 +347,15 @@ struct TranscriptView: View {
         }
     }
 
-    /// Consecutive segments from the same speaker are collapsed into one turn so
-    /// the view reads as a conversation. Removed segments never merge with kept
-    /// ones — that would make a partly-removed turn impossible to represent.
-    private var mergedTurns: [(speaker: String, text: String, removed: Bool)] {
-        let excluded = recording.excludedIndexSet
-        var turns: [(speaker: String, text: String, removed: Bool)] = []
+    private var mergedTurns: [(speaker: String, text: String)] {
+        var turns: [(speaker: String, text: String)] = []
 
-        for (index, segment) in recording.segments.enumerated() {
-            let removed = excluded.contains(index)
-            if removed && !showRemoved { continue }
-
+        for segment in recording.segments {
             let speaker = segment.speaker ?? "Unknown"
-            if let last = turns.last, last.speaker == speaker, last.removed == removed {
+            if let last = turns.last, last.speaker == speaker {
                 turns[turns.count - 1].text += " " + segment.text
             } else {
-                turns.append((speaker, segment.text, removed))
+                turns.append((speaker, segment.text))
             }
         }
 
@@ -325,7 +366,7 @@ struct TranscriptView: View {
     private var plainText: some View {
         VStack(alignment: .leading, spacing: 12) {
             if searchText.isEmpty {
-                Text(displayedPlainText)
+                Text(recording.transcript ?? "")
                     .font(.body)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -346,16 +387,8 @@ struct TranscriptView: View {
         }
     }
 
-    /// Plain mode shows the edited transcript, or the full original when the
-    /// user has asked to see removed content.
-    private var displayedPlainText: String {
-        showRemoved
-            ? TranscriptComposer.compose(recording.segments)
-            : recording.effectiveTranscript
-    }
-
     private var matchingParagraphs: [String] {
-        displayedPlainText
+        (recording.transcript ?? "")
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && $0.localizedStandardContains(searchText) }
@@ -391,19 +424,9 @@ struct TranscriptView: View {
         return attributed
     }
 
-    /// Stable per-speaker colour. Keyed on the full roster rather than the
-    /// filtered one so colours don't shift when segments are removed.
     private func color(for speaker: String) -> Color {
         let palette: [Color] = [.blue, .purple, .teal, .orange, .pink, .green, .indigo, .brown]
-        var roster: [String] = []
-        for name in recording.segments.compactMap(\.speaker) where !roster.contains(name) {
-            roster.append(name)
-        }
-        guard let index = roster.firstIndex(of: speaker) else { return .secondary }
+        guard let index = speakers.firstIndex(of: speaker) else { return .secondary }
         return palette[index % palette.count]
-    }
-
-    private var shareableText: String {
-        recording.effectiveTranscript
     }
 }

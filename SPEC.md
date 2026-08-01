@@ -134,31 +134,61 @@ A dedicated screen, reached from the detail view, with two modes:
 Both support find-in-transcript with match highlighting. The footer states which engine
 produced the transcript and, for the speaker-aware path, warns that labels are inferred.
 
-### Removing parts of a transcript
+### Redaction — removing parts of a recording
 
-An edit mode lets the user strike segments out of the transcript — crosstalk, a side
-conversation, someone reading a password aloud.
+Segments are typically removed for privacy: crosstalk, a side conversation, someone
+reading a password aloud. So removal is **destructive by design** — the point is that the
+content stops existing.
 
-- **Reversible, never destructive.** Removed segments are flagged by index in
-  `excludedSegmentIndices`; the text stays on disk and can be restored individually or all
-  at once. The audio file is never modified.
-- **Per-segment granularity**, which is finer than the merged turns shown in reading mode.
-  Removing part of a single segment is not supported.
-- `effectiveTranscript` rebuilds the text from the kept segments and is what
-  **summarization, search, and export** all consume. `transcript` holds the untouched
-  original purely to rebuild from.
-- Export discloses that segments were removed, so an edited transcript doesn't read as a
-  complete record of what was said.
-- A speaker whose every segment is removed drops out of the legend; speaker colours stay
-  keyed to the full roster so they don't shift as things are removed.
-- Re-transcribing clears removals, since segment indices are meaningless against a
-  different set of segments.
+Selecting segments and confirming will:
 
-After an edit, the app **offers** to regenerate the summary rather than doing it
+1. delete the segment text from the transcript,
+2. cut the corresponding audio out of the recording, overwriting the file in place,
+3. shift surviving segment timestamps onto the shortened timeline,
+4. update the duration and offer to regenerate the summary.
+
+There is **no undo and no backup copy**. A confirmation dialog states this and names how
+much audio will be cut before anything happens.
+
+#### Timing accuracy is the safety-critical part
+
+Cutting at the wrong offset is a *silent* privacy failure: the user believes the sensitive
+audio is destroyed while it is still in the file. `SegmentTimingSource` guards against
+this:
+
+| Source | Origin | Safe to cut? |
+|---|---|---|
+| `exact` | real `CMTimeRange` from the on-device engine | yes |
+| `estimated` | proportional within a 15-minute chunk — can be tens of seconds out | **no** |
+| `aligned` | cloud segments matched against on-device timings | yes |
+
+Speaker-aware transcripts start as `estimated`, so redaction **cannot** run on them
+directly. `RedactionService` first performs forced alignment: it re-transcribes the audio
+with the on-device engine to obtain true time ranges, then `TranscriptAligner` matches the
+two word sequences with a monotonic bounded-lookahead walk and transfers the real timings
+onto the speaker segments. Alignment that matches under 50% of words is **refused** rather
+than trusted, so an unrelated or failed reference can't produce confident-looking garbage.
+
+#### Cutting
+
+`AudioEditor` pads every removed range by 200 ms on each side, merges overlaps, builds an
+`AVMutableComposition` of the surviving spans, re-encodes at the capture settings, and
+swaps the file in with an atomic `replaceItemAt`. The padding errs toward **over**-removal:
+clipping a syllable off a neighbouring word is a far better outcome than leaving the tail
+of what the user wanted gone.
+
+Removing the entire recording is refused — delete it instead.
+
+#### What survives
+
+Only counts: `redactedSegmentCount` and `redactedDuration`, so the UI and exports can
+disclose that the recording is no longer complete. These deliberately survive
+re-transcription, because destroyed audio stays destroyed.
+
+After redaction the app **offers** to regenerate the summary rather than doing it
 automatically — regeneration costs money, and spending it because a user declined the
-prompt would be wrong. Declining leaves a persistent "Summary is out of date" banner on
-the detail view, tracked by `summaryNeedsRefresh` and cleared on the next successful
-summarization.
+prompt would be wrong. Declining leaves a persistent "Summary is out of date" banner,
+tracked by `summaryNeedsRefresh`.
 
 ## Settings
 

@@ -5,6 +5,7 @@ import SwiftUI
 struct VoiceRecorderApp: App {
     @State private var settings: SettingsStore
     @State private var pipeline: ProcessingPipeline
+    @State private var redaction = RedactionService()
 
     private let container: ModelContainer
 
@@ -28,6 +29,7 @@ struct VoiceRecorderApp: App {
             RootView()
                 .environment(settings)
                 .environment(pipeline)
+                .environment(redaction)
         }
         .modelContainer(container)
     }

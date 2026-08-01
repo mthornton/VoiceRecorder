@@ -82,11 +82,11 @@ final class ProcessingPipeline {
         recording.transcript = nil
         recording.segmentsData = nil
         recording.transcriptionEngineRaw = nil
-        // Segment indices only mean something against the segments they came
-        // from; a new transcription renumbers everything, so removals cannot
-        // carry over.
-        recording.excludedSegmentIndices = []
+        recording.timingSourceRaw = nil
         recording.summaryNeedsRefresh = false
+        // Redaction counts are deliberately not reset: audio that was destroyed
+        // stays destroyed, so the recording is still incomplete and must keep
+        // saying so.
         save(context)
 
         await process(recording, context: context)
@@ -126,6 +126,11 @@ final class ProcessingPipeline {
             recording.transcript = result.text
             recording.segments = result.segments
             recording.transcriptionEngineRaw = result.engine.rawValue
+            // The cloud engine's times are proportional estimates; only the
+            // on-device engine reports real ranges.
+            recording.timingSourceRaw = (result.engine == .cloudSpeakerAware
+                ? SegmentTimingSource.estimated
+                : SegmentTimingSource.exact).rawValue
             recording.status = .transcribed
             recording.errorMessage = nil
             save(context)
@@ -143,9 +148,9 @@ final class ProcessingPipeline {
         template: SummaryTemplate,
         context: ModelContext
     ) async {
-        // The effective transcript, so anything the user removed is genuinely
-        // absent from what the model sees.
-        let transcript = recording.effectiveTranscript
+        // Redaction rewrites `transcript` in place, so this is already free of
+        // anything the user removed.
+        let transcript = recording.transcript ?? ""
         guard !transcript.isEmpty else { return }
 
         recording.status = .summarizing

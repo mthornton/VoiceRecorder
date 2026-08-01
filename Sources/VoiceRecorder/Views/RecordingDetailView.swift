@@ -33,6 +33,11 @@ struct RecordingDetailView: View {
         .toolbar { toolbarContent }
         .onAppear { player.load(url: recording.audioURL) }
         .onDisappear { player.stop() }
+        // Redaction rewrites the file behind an unchanged URL, so the player has
+        // to be told explicitly that what it cached is no longer the audio.
+        .onChange(of: recording.duration) { _, _ in
+            player.reload(url: recording.audioURL)
+        }
         .alert("Rename Recording", isPresented: $isRenaming) {
             TextField("Title", text: $draftTitle)
             Button("Cancel", role: .cancel) {}
@@ -207,16 +212,17 @@ struct RecordingDetailView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                if recording.removedSegmentCount > 0 {
+                if recording.hasRedactions {
                     Label(
-                        "\(recording.removedSegmentCount) segment\(recording.removedSegmentCount == 1 ? "" : "s") removed",
+                        "\(recording.redactedSegmentCount) segment\(recording.redactedSegmentCount == 1 ? "" : "s") "
+                            + "(\(recording.formattedRedactedDuration)) permanently removed",
                         systemImage: "scissors"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
 
-                Text(recording.effectiveTranscript)
+                Text(recording.transcript ?? "")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
