@@ -13,7 +13,9 @@ enum RedactionError: LocalizedError {
             return "This recording has no transcript segments to remove."
         case .alignmentFailed:
             return "Couldn't work out exactly where those words are in the audio, so nothing was removed. "
-                + "Re-transcribing the recording may fix it."
+                + "Cutting on a guess could leave the sensitive part in the recording.\n\n"
+                + "You can switch to the on-device transcript, which has exact timings. "
+                + "You'll lose the speaker labels."
         case .nothingSelected:
             return "No segments were selected."
         }
@@ -46,6 +48,13 @@ final class RedactionService {
 
     private(set) var phase: Phase = .idle
 
+    /// The on-device transcription produced during a failed alignment attempt.
+    ///
+    /// Kept so a refusal isn't a dead end: the user can adopt this transcript,
+    /// which has exact timings, and redact from it. Re-running transcription to
+    /// offer that would waste the minutes we already spent.
+    private(set) var fallbackTranscript: TranscriptionResult?
+
     private let transcriber: TranscriptionProvider
 
     init(transcriber: TranscriptionProvider = OnDeviceTranscriber()) {
@@ -53,6 +62,8 @@ final class RedactionService {
     }
 
     var isWorking: Bool { phase != .idle }
+
+    var canOfferFallback: Bool { fallbackTranscript != nil }
 
     /// Removes `indices` from the recording, cutting the corresponding audio.
     func redact(
@@ -69,14 +80,24 @@ final class RedactionService {
         guard !selected.isEmpty else { throw RedactionError.nothingSelected }
 
         defer { phase = .idle }
+        fallbackTranscript = nil
 
         // Estimated timings must never drive a cut — see SegmentTimingSource.
         var working = segments
         if recording.needsAlignmentBeforeRedaction {
             phase = .aligning
-            guard let aligned = try await alignedSegments(for: recording, segments: segments) else {
+
+            let reference = try await transcriber.transcribe(fileURL: recording.audioURL)
+            guard let aligned = TranscriptAligner.align(
+                segments: segments,
+                reference: reference.segments
+            ) else {
+                // Hold onto the on-device transcript so the UI can offer it as a
+                // way forward instead of leaving the user stuck.
+                fallbackTranscript = reference
                 throw RedactionError.alignmentFailed
             }
+
             working = aligned
             recording.segments = aligned
             recording.timingSourceRaw = SegmentTimingSource.aligned.rawValue
@@ -94,16 +115,28 @@ final class RedactionService {
         try? context.save()
     }
 
-    // MARK: - Alignment
+    // MARK: - Fallback
 
-    /// Transcribes the audio again with the on-device engine purely to obtain
-    /// real time ranges, then maps the speaker segments onto them.
-    private func alignedSegments(
-        for recording: Recording,
-        segments: [TranscriptSegment]
-    ) async throws -> [TranscriptSegment]? {
-        let reference = try await transcriber.transcribe(fileURL: recording.audioURL)
-        return TranscriptAligner.align(segments: segments, reference: reference.segments)
+    /// Replaces the recording's transcript with the on-device one captured
+    /// during a failed alignment.
+    ///
+    /// Speaker labels are lost, which is a real cost — but the on-device timings
+    /// are exact, so redaction becomes possible. For a feature whose whole point
+    /// is removing sensitive audio, being able to cut accurately beats knowing
+    /// who said it.
+    func adoptFallbackTranscript(_ recording: Recording, context: ModelContext) {
+        guard let fallback = fallbackTranscript else { return }
+
+        recording.transcript = fallback.text
+        recording.segments = fallback.segments
+        recording.transcriptionEngineRaw = fallback.engine.rawValue
+        recording.timingSourceRaw = SegmentTimingSource.exact.rawValue
+        if recording.hasSummary {
+            recording.summaryNeedsRefresh = true
+        }
+
+        fallbackTranscript = nil
+        try? context.save()
     }
 
     // MARK: - Applying the edit

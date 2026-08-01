@@ -95,7 +95,13 @@ struct TranscriptView: View {
             "Couldn't remove that",
             isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
         ) {
-            Button("OK", role: .cancel) { errorMessage = nil }
+            if redaction.canOfferFallback {
+                Button("Use On-device Transcript") {
+                    redaction.adoptFallbackTranscript(recording, context: context)
+                    errorMessage = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
         }

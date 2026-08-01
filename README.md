@@ -66,8 +66,11 @@ get a confirmation naming how much audio will be cut before anything happens.
 On speaker-aware transcripts the app first re-listens to the recording on-device to work
 out exactly where those words are, because the speaker-aware timings are only estimates
 and cutting on an estimate would leave the sensitive audio in the file. That adds a minute
-or two on a long recording. If it can't confidently locate the words, it removes nothing
-and tells you.
+or two on a long recording.
+
+If it can't confidently locate the words it removes nothing, and offers to switch you to
+the on-device transcript instead — exact timings, no speaker labels — so you can still
+redact.
 
 Afterwards the app offers to regenerate the summary, and flags the existing one as out of
 date until you do.

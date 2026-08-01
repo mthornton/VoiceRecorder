@@ -164,10 +164,50 @@ this:
 
 Speaker-aware transcripts start as `estimated`, so redaction **cannot** run on them
 directly. `RedactionService` first performs forced alignment: it re-transcribes the audio
-with the on-device engine to obtain true time ranges, then `TranscriptAligner` matches the
-two word sequences with a monotonic bounded-lookahead walk and transfers the real timings
-onto the speaker segments. Alignment that matches under 50% of words is **refused** rather
-than trusted, so an unrelated or failed reference can't produce confident-looking garbage.
+with the on-device engine to obtain true time ranges, then `TranscriptAligner` transfers
+those timings onto the speaker segments.
+
+#### How alignment works, and why not the obvious way
+
+The first implementation walked both word sequences with two pointers, matching greedily
+within a lookahead window. It failed on real audio. Two engines disagree on 5–15% of
+words, and each disagreement let the walk match a common word ("the", "and") far ahead of
+where it belonged; the pointer jumped, skipped everything between, and the error compounded.
+Measured against a real 285-second recording:
+
+| Word error rate | Greedy walk | Trigram anchoring |
+|---|---|---|
+| 0% | 1.9s mean error | 1.9s |
+| 5% | **refused** | 2.2s |
+| 10% | **accepted, 75s out** | 3.4s |
+| 15% | **refused** | 5.0s |
+| 25% | **refused** | 6.7s |
+
+The 10% row is the one that mattered: it passed the confidence check while being wrong by
+over a minute — precisely the silent failure this mechanism exists to prevent. Word match
+ratio turned out to be a poor proxy for timing accuracy, because a desynced walk still
+racks up matches on common words.
+
+The current implementation anchors on **trigrams shared by both transcripts**, reduced to a
+strictly increasing sequence by a longest-increasing-subsequence pass, with positions
+between anchors interpolated. A repeated word is ambiguous; a three-word sequence rarely
+is, and the monotonicity filter discards any pairing inconsistent with the surrounding
+order. Repeats are tolerated up to a cap rather than requiring global uniqueness — ordinary
+speech reuses stock phrases constantly, and demanding unique trigrams refuses real meetings.
+
+Confidence is judged on anchor count, coverage, and the **longest unanchored run in words**
+— an absolute bound, since what degrades interpolation is the distance between surrounding
+anchors, not how large that gap looks relative to the whole recording.
+
+End-to-end, cutting an aligned range and re-transcribing the result lands within 0–3 words
+of the intended position at 5–15% word error rate.
+
+#### When alignment is refused
+
+Nothing is cut. The on-device transcript produced during the attempt is retained, and the
+user is offered it as a way forward: its timings are exact, so redaction works, at the cost
+of the speaker labels. For a feature about removing sensitive audio, cutting accurately
+beats knowing who said it.
 
 #### Cutting
 

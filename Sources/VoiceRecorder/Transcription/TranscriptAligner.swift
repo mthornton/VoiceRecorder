@@ -31,6 +31,24 @@ enum SegmentTimingSource: String, Codable, Sendable {
 /// on-device engine returns real time ranges but no speakers. Running both over
 /// the same audio and matching the word sequences gives us the speakers *and*
 /// the timings — which is what makes cutting audio safe on the cloud path.
+///
+/// ## Why anchors rather than a sequential word walk
+///
+/// The obvious approach — walk both sequences with two pointers, matching words
+/// as you go — fails badly on real transcripts. Two engines disagree on maybe
+/// 5–15% of words, and every disagreement lets the walk match a common word
+/// ("the", "and") far ahead of where it should. The pointer jumps, skips the
+/// words in between, and the error compounds for the rest of the recording.
+/// Measured on a 285-second recording, that approach either refused outright at
+/// a 5% word error rate or — worse — accepted an alignment that was 75 seconds
+/// out at 10%, which is exactly the silent failure this whole mechanism exists
+/// to prevent.
+///
+/// Anchoring on *trigrams that occur exactly once in both transcripts* removes
+/// that failure mode. A repeated word is ambiguous; a unique three-word sequence
+/// essentially never is. Anchors are then forced into a strictly increasing
+/// sequence, so a spurious match cannot drag everything after it out of place,
+/// and positions between anchors are interpolated.
 enum TranscriptAligner {
     private struct TimedWord {
         let normalized: String
@@ -38,103 +56,271 @@ enum TranscriptAligner {
         let end: TimeInterval
     }
 
+    struct Quality {
+        /// Matched trigram anchors surviving the monotonicity filter.
+        let anchorCount: Int
+        /// Fraction of the transcript lying between the first and last anchor.
+        /// Outside that span, positions are extrapolated rather than measured.
+        let coverage: Double
+        /// Longest run of words with no anchor. Positions inside a gap are
+        /// interpolated, so this bounds how wrong any single position can be.
+        let largestGapWords: Int
+    }
+
+    /// Minimum anchors before alignment is worth trusting at all.
+    static let minimumAnchors = 3
+    /// Anchors must span at least this much of the transcript.
+    static let minimumCoverage = 0.6
+    /// Longest tolerable unanchored run, in words.
+    ///
+    /// Measured in words rather than as a fraction on purpose: what degrades
+    /// interpolation is the absolute distance between the anchors either side,
+    /// not how big that gap looks relative to the whole recording. Forty words
+    /// is roughly fifteen seconds of speech, across which linear interpolation
+    /// stays comfortably inside the cut's safety margin.
+    static let maximumGapWords = 40
+
     /// Rewrites `segments` with times taken from `reference`, preserving text
-    /// and speakers. Returns nil when alignment is too poor to trust, so the
-    /// caller can refuse to cut rather than cut in the wrong place.
+    /// and speakers. Returns nil when the match is too weak to trust, so the
+    /// caller refuses to cut rather than cutting in the wrong place.
     static func align(
         segments: [TranscriptSegment],
-        reference: [TranscriptSegment],
-        minimumMatchRatio: Double = 0.5
+        reference: [TranscriptSegment]
     ) -> [TranscriptSegment]? {
+        alignWithQuality(segments: segments, reference: reference)?.segments
+    }
+
+    /// Same as `align`, but also reports why it succeeded — useful for
+    /// diagnosing a refusal.
+    static func alignWithQuality(
+        segments: [TranscriptSegment],
+        reference: [TranscriptSegment]
+    ) -> (segments: [TranscriptSegment], quality: Quality)? {
         guard !segments.isEmpty, !reference.isEmpty else { return nil }
 
         let referenceWords = timedWords(from: reference)
-        guard !referenceWords.isEmpty else { return nil }
+        guard referenceWords.count >= 3 else { return nil }
 
-        // Flatten target words, remembering which segment each came from.
-        var targetWords: [(text: String, segment: Int)] = []
-        for (index, segment) in segments.enumerated() {
-            for word in normalizedWords(segment.text) {
-                targetWords.append((word, index))
-            }
-        }
-        guard !targetWords.isEmpty else { return nil }
-
-        // Both transcripts describe the same audio, so their word sequences run
-        // roughly in parallel. A monotonic two-pointer walk with a bounded
-        // lookahead absorbs the disagreements (mis-hearings, different
-        // punctuation, dropped filler) without ever going backwards.
-        let lookahead = 40
-        var matches: [Int: (first: Int, last: Int)] = [:]
-        var matchCount = 0
-        var refIndex = 0
-
-        for target in targetWords {
-            guard refIndex < referenceWords.count else { break }
-
-            var found: Int?
-            let limit = min(refIndex + lookahead, referenceWords.count)
-            for candidate in refIndex..<limit where referenceWords[candidate].normalized == target.text {
-                found = candidate
-                break
-            }
-
-            guard let matchedIndex = found else { continue }
-
-            matchCount += 1
-            refIndex = matchedIndex + 1
-
-            if let existing = matches[target.segment] {
-                matches[target.segment] = (existing.first, matchedIndex)
+        var targetWords: [String] = []
+        var wordRanges: [(first: Int, last: Int)?] = []
+        for segment in segments {
+            let words = normalizedWords(segment.text)
+            if words.isEmpty {
+                wordRanges.append(nil)
             } else {
-                matches[target.segment] = (matchedIndex, matchedIndex)
+                wordRanges.append((targetWords.count, targetWords.count + words.count - 1))
+                targetWords.append(contentsOf: words)
             }
         }
+        guard targetWords.count >= 3 else { return nil }
 
-        // A poor match usually means the two engines heard very different
-        // things — different language, mostly noise, or a failed run. Better to
-        // refuse than to hand back confident-looking garbage.
-        let ratio = Double(matchCount) / Double(targetWords.count)
-        guard ratio >= minimumMatchRatio else { return nil }
+        let anchors = monotonicAnchors(
+            target: targetWords,
+            reference: referenceWords.map(\.normalized)
+        )
+
+        let quality = assess(anchors: anchors, targetCount: targetWords.count)
+        guard quality.anchorCount >= minimumAnchors,
+              quality.coverage >= minimumCoverage,
+              quality.largestGapWords <= maximumGapWords
+        else { return nil }
+
+        // Piecewise-linear map from target word position to reference word
+        // position, exact at every anchor and interpolated between them.
+        func referencePosition(for index: Int) -> Double {
+            if index <= anchors[0].target {
+                let scale = anchors[0].target > 0
+                    ? Double(anchors[0].reference) / Double(anchors[0].target)
+                    : 1
+                return Double(index) * scale
+            }
+            if let last = anchors.last, index >= last.target {
+                let remainingTarget = Double(targetWords.count - last.target)
+                let remainingReference = Double(referenceWords.count - last.reference)
+                let scale = remainingTarget > 0 ? remainingReference / remainingTarget : 1
+                return Double(last.reference) + Double(index - last.target) * scale
+            }
+
+            var lower = anchors[0]
+            for anchor in anchors {
+                if anchor.target <= index { lower = anchor } else { break }
+            }
+            guard let upper = anchors.first(where: { $0.target > index }) else {
+                return Double(lower.reference)
+            }
+
+            let span = Double(upper.target - lower.target)
+            let progress = span > 0 ? Double(index - lower.target) / span : 0
+            return Double(lower.reference)
+                + progress * Double(upper.reference - lower.reference)
+        }
+
+        func time(at position: Double, useEnd: Bool) -> TimeInterval {
+            let clamped = min(max(position, 0), Double(referenceWords.count - 1))
+            let word = referenceWords[Int(clamped.rounded())]
+            return useEnd ? word.end : word.start
+        }
 
         var aligned = segments
         var lastEnd: TimeInterval = 0
 
         for index in aligned.indices {
-            if let match = matches[index] {
-                let start = referenceWords[match.first].start
-                let end = referenceWords[match.last].end
-                aligned[index].start = max(start, lastEnd)
-                aligned[index].end = max(end, aligned[index].start)
-            } else {
-                // Unmatched segment: pin it to the gap between its neighbours
-                // rather than leaving a stale estimate in place.
-                let nextStart = nextMatchedStart(after: index, matches: matches, words: referenceWords)
+            guard let range = wordRanges[index] else {
                 aligned[index].start = lastEnd
-                aligned[index].end = max(nextStart ?? lastEnd, lastEnd)
+                aligned[index].end = lastEnd
+                continue
             }
+
+            let start = time(at: referencePosition(for: range.first), useEnd: false)
+            let end = time(at: referencePosition(for: range.last), useEnd: true)
+
+            aligned[index].start = max(start, lastEnd)
+            aligned[index].end = max(end, aligned[index].start)
             lastEnd = aligned[index].end
         }
 
-        return aligned
+        return (aligned, quality)
     }
 
-    private static func nextMatchedStart(
-        after index: Int,
-        matches: [Int: (first: Int, last: Int)],
-        words: [TimedWord]
-    ) -> TimeInterval? {
-        let laterKeys = matches.keys.filter { $0 > index }.sorted()
-        guard let next = laterKeys.first, let match = matches[next] else { return nil }
-        return words[match.first].start
+    // MARK: - Anchoring
+
+    private struct Anchor {
+        let target: Int
+        let reference: Int
     }
+
+    /// Trigrams shared by both transcripts, reduced to a strictly increasing
+    /// sequence of positions.
+    ///
+    /// Requiring globally unique trigrams sounds safer but fails on ordinary
+    /// speech: people repeat stock phrases constantly, and a meeting where
+    /// everyone says "the migration timeline" a dozen times yields almost no
+    /// unique trigram at all. So repeats are allowed, up to a cap, and the
+    /// ambiguity is resolved by the monotonicity filter below — a repeated
+    /// trigram contributes several candidate positions, and only the one
+    /// consistent with the surrounding order survives.
+    private static let maximumRepeats = 4
+    private static let maximumCandidatePairs = 200_000
+
+    private static func monotonicAnchors(target: [String], reference: [String]) -> [Anchor] {
+        var pairs = candidatePairs(target: target, reference: reference, repeats: maximumRepeats)
+
+        // Pathologically repetitive input could otherwise explode; fall back to
+        // strictly unique trigrams, which is cheap and still correct.
+        if pairs.count > maximumCandidatePairs {
+            pairs = candidatePairs(target: target, reference: reference, repeats: 1)
+        }
+        guard !pairs.isEmpty else { return [] }
+
+        // Ascending by target, descending by reference on ties. That ordering
+        // makes a strictly-increasing run over reference positions pick at most
+        // one candidate per target position.
+        pairs.sort {
+            $0.target != $1.target ? $0.target < $1.target : $0.reference > $1.reference
+        }
+
+        return longestIncreasingByReference(pairs)
+    }
+
+    private static func candidatePairs(
+        target: [String],
+        reference: [String],
+        repeats: Int
+    ) -> [Anchor] {
+        let targetTrigrams = trigramPositions(target, maximumRepeats: repeats)
+        let referenceTrigrams = trigramPositions(reference, maximumRepeats: repeats)
+
+        var pairs: [Anchor] = []
+        for (key, targetIndices) in targetTrigrams {
+            guard let referenceIndices = referenceTrigrams[key] else { continue }
+            for targetIndex in targetIndices {
+                for referenceIndex in referenceIndices {
+                    pairs.append(Anchor(target: targetIndex, reference: referenceIndex))
+                }
+            }
+        }
+        return pairs
+    }
+
+    /// Trigram → every position it occurs at, dropping trigrams so common that
+    /// they carry no positional information.
+    private static func trigramPositions(_ words: [String], maximumRepeats: Int) -> [String: [Int]] {
+        guard words.count >= 3 else { return [:] }
+
+        var positions: [String: [Int]] = [:]
+        for index in 0...(words.count - 3) {
+            let key = words[index] + " " + words[index + 1] + " " + words[index + 2]
+            positions[key, default: []].append(index)
+        }
+
+        return positions.filter { $0.value.count <= maximumRepeats }
+    }
+
+    /// Patience-style longest increasing subsequence, O(n log n).
+    private static func longestIncreasingByReference(_ pairs: [Anchor]) -> [Anchor] {
+        guard !pairs.isEmpty else { return [] }
+
+        var tailIndices: [Int] = []
+        var predecessors = [Int](repeating: -1, count: pairs.count)
+
+        for (index, pair) in pairs.enumerated() {
+            var low = 0
+            var high = tailIndices.count
+            while low < high {
+                let mid = (low + high) / 2
+                if pairs[tailIndices[mid]].reference < pair.reference {
+                    low = mid + 1
+                } else {
+                    high = mid
+                }
+            }
+            if low > 0 { predecessors[index] = tailIndices[low - 1] }
+            if low == tailIndices.count {
+                tailIndices.append(index)
+            } else {
+                tailIndices[low] = index
+            }
+        }
+
+        var result: [Anchor] = []
+        var cursor = tailIndices.last ?? -1
+        while cursor >= 0 {
+            result.append(pairs[cursor])
+            cursor = predecessors[cursor]
+        }
+        return result.reversed()
+    }
+
+    // MARK: - Quality
+
+    private static func assess(anchors: [Anchor], targetCount: Int) -> Quality {
+        guard let first = anchors.first, let last = anchors.last, targetCount > 0 else {
+            return Quality(anchorCount: anchors.count, coverage: 0, largestGapWords: Int.max)
+        }
+
+        let coverage = Double(last.target - first.target) / Double(targetCount)
+
+        // Gaps include the unanchored head and tail, which are extrapolated and
+        // therefore just as untrustworthy as an interior gap.
+        var largestGap = max(first.target, targetCount - 1 - last.target)
+        for index in 1..<max(anchors.count, 1) {
+            largestGap = max(largestGap, anchors[index].target - anchors[index - 1].target)
+        }
+
+        return Quality(
+            anchorCount: anchors.count,
+            coverage: coverage,
+            largestGapWords: largestGap
+        )
+    }
+
+    // MARK: - Words
 
     /// Splits reference segments into words carrying interpolated times.
     ///
-    /// The on-device engine times whole utterances, not words, so times within a
-    /// segment are interpolated by character position. Utterances are a few
-    /// seconds long, which keeps that error well under a second — as opposed to
-    /// the chunk-scale error the estimates carry.
+    /// The on-device engine times whole utterances, so times within a segment
+    /// are interpolated by character position. In practice it emits very short
+    /// segments — often single words — which keeps that error small.
     private static func timedWords(from segments: [TranscriptSegment]) -> [TimedWord] {
         var result: [TimedWord] = []
 
