@@ -86,15 +86,8 @@ final class AudioRecorder {
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
 
-            let settings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: 44_100,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 64_000,
-                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-            ]
-
-            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            // Shared with the watch so both devices produce identical files.
+            let recorder = try AVAudioRecorder(url: url, settings: RecordingFormat.settings)
             recorder.isMeteringEnabled = true
             guard recorder.record() else {
                 state = .failed("Could not start recording.")

@@ -65,3 +65,7 @@ fastlane/test_output
 VoiceRecorder.xcodeproj/
 Sources/VoiceRecorder/Resources/Info.plist
 .DS_Store
+Sources/VoiceRecorderWatch/Resources/Info.plist
+
+# xcodebuild output when -derivedDataPath is not passed
+build/

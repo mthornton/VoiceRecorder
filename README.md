@@ -14,10 +14,25 @@ they're reliable with a few clear speakers and less so with crosstalk or large g
 
 See [SPEC.md](SPEC.md) for the full v1 scope and what's deliberately out of it.
 
+## Apple Watch
+
+The Watch app records with the Watch's own microphone and sends the audio to your iPhone,
+where it's transcribed and summarized like anything else. Start a recording on the phone
+and it uses the phone mic; start it on the Watch and it uses the Watch mic.
+
+Transfers queue, so the phone doesn't need to be in range — the audio arrives and starts
+processing whenever it next is, even if the iPhone app isn't open.
+
+**Recording may stop if you lower your wrist.** watchOS suspends apps that aren't
+frontmost. The background audio mode is declared, but whether that's enough needs checking
+on a real Watch — see [SPEC.md](SPEC.md) for the workaround if it isn't.
+
 ## Requirements
 
 - Xcode 26.6 or later (iOS 26 SDK)
 - iOS 26+ device or simulator
+- watchOS 26+ for the Watch app. Building the combined scheme needs the watchOS platform
+  installed: `xcodebuild -downloadPlatform watchOS`
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`
 - An [OpenRouter](https://openrouter.ai/keys) API key, for summaries only
 
@@ -78,14 +93,17 @@ date until you do.
 ## Layout
 
 ```
-Sources/VoiceRecorder/
-  App/              app entry point and model container
-  Models/           SwiftData Recording, summary templates, audio file storage
-  Audio/            AVAudioRecorder capture, AVAudioPlayer playback
-  Transcription/    TranscriptionProvider protocol + on-device implementation
-  Summarization/    OpenRouter client, Keychain, settings, prompt assembly
-  Pipeline/         transcribe → summarize orchestration
-  Views/            SwiftUI screens
+Sources/
+  Shared/                 recording format and watch-transfer contract, in both targets
+  VoiceRecorder/          the iPhone app
+    App/                  app entry point and model container
+    Models/               SwiftData Recording, summary templates, audio file storage
+    Audio/                capture, playback, redaction cutting
+    Transcription/        provider protocol, on-device and speaker-aware engines, aligner
+    Summarization/        OpenRouter client, Keychain, settings, prompt assembly
+    Pipeline/             transcribe → summarize orchestration, redaction, watch receipt
+    Views/                SwiftUI screens
+  VoiceRecorderWatch/     the Watch app — record and transfer only
 ```
 
 The `TranscriptionProvider` protocol in `Transcription/` is the seam between the two

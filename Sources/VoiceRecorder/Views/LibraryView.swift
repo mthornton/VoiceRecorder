@@ -85,6 +85,11 @@ private struct RecordingRow: View {
                 .lineLimit(2)
 
             HStack(spacing: 6) {
+                // Only badge watch recordings — the phone is the default and
+                // marking every row would be noise.
+                if recording.source == .watch {
+                    Image(systemName: RecordingSource.watch.systemImage)
+                }
                 Text(recording.createdAt.formatted(date: .abbreviated, time: .shortened))
                 Text("·")
                 Text(recording.formattedDuration)

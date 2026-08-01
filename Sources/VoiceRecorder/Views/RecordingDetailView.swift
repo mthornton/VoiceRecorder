@@ -59,6 +59,7 @@ struct RecordingDetailView: View {
                 .font(.title2.bold())
 
             HStack(spacing: 6) {
+                Image(systemName: recording.source.systemImage)
                 Text(recording.createdAt.formatted(date: .long, time: .shortened))
                 Text("·")
                 Text(recording.formattedDuration)

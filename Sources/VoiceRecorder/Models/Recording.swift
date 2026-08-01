@@ -70,6 +70,10 @@ final class Recording {
     /// setting is not evidence of what actually ran.
     var transcriptionEngineRaw: String?
 
+    /// Which device's microphone captured this. Defaults to the phone, which is
+    /// correct for everything recorded before the watch app existed.
+    var sourceRaw: String = RecordingSource.phone.rawValue
+
     /// How much to trust segment times. Nil falls back to what the engine
     /// implies. Cutting audio is refused unless this is safe — see
     /// `SegmentTimingSource`.
@@ -123,6 +127,10 @@ extension Recording {
 
     var hasTranscript: Bool {
         !(transcript ?? "").isEmpty
+    }
+
+    var source: RecordingSource {
+        RecordingSource(rawValue: sourceRaw) ?? .phone
     }
 
     var transcriptionEngine: TranscriptionEngine? {

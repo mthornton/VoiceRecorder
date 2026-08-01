@@ -4,6 +4,7 @@ options:
   bundleIdPrefix: com.michaelthornton
   deploymentTarget:
     iOS: "26.0"
+    watchOS: "26.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -23,6 +24,14 @@ targets:
     platform: iOS
     sources:
       - path: Sources/VoiceRecorder
+      - path: Sources/Shared
+    dependencies:
+      # Embeds the watch app inside the iOS app so installing one installs both.
+      - target: VoiceRecorderWatch
+        embed: true
+        copy:
+          destination: productsDirectory
+          subpath: "$(CONTENTS_FOLDER_PATH)/Watch"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.michaelthornton.VoiceRecorder
@@ -46,5 +55,34 @@ targets:
           Voice Recorder transcribes your recordings on this device so you can
           search and summarize them.
         UIBackgroundModes:
+          - audio
+        ITSAppUsesNonExemptEncryption: false
+
+  VoiceRecorderWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: Sources/VoiceRecorderWatch
+      - path: Sources/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.michaelthornton.VoiceRecorder.watchkitapp
+        PRODUCT_NAME: Voice Recorder
+        TARGETED_DEVICE_FAMILY: "4"
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+    info:
+      path: Sources/VoiceRecorderWatch/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Voice Recorder
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.michaelthornton.VoiceRecorder
+        NSMicrophoneUsageDescription: >-
+          Voice Recorder needs the microphone to record audio, which is sent to
+          your iPhone to be transcribed and summarized.
+        # The mechanism for continuing to record once the app stops being
+        # frontmost. watchOS suspends apps aggressively, so how far this
+        # actually gets us needs checking on a real watch.
+        WKBackgroundModes:
           - audio
         ITSAppUsesNonExemptEncryption: false

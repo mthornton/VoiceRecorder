@@ -253,9 +253,54 @@ configured.
 An hour of speech is roughly 13k input tokens and ~1k output — cents per summary on a
 mid-tier model. Transcription is free (on-device).
 
-## Explicitly out of scope for v1
+## Apple Watch
 
-- **Apple Watch app** — deferred to a future version.
+A standalone watchOS app that records with the **Watch's own microphone** and sends the
+audio to the phone for processing. Recording started on the phone uses the phone mic;
+recording started on the Watch uses the Watch mic. There is no remote control in either
+direction — each device records itself.
+
+This sidesteps the problem that got the Watch deferred from v1. The original plan was for
+the Watch to *start a recording on the phone*, which needs iOS to wake the app and begin
+mic capture from the background — heavily restricted, and the reason it was cut. Recording
+locally needs none of that.
+
+### What the Watch can and cannot do
+
+`AVAudioRecorder` is available on watchOS, so capture works. **`Speech.framework` does not
+exist on watchOS**, so the Watch cannot transcribe — which is why the audio goes to the
+phone rather than being processed in place.
+
+### Transfer
+
+`WCSession.transferFile` rather than `sendMessage`: it queues on disk, survives the phone
+being out of range or its app not running, retries on the system's schedule, and causes iOS
+to launch the app in the background to receive. Record on a walk with the phone at home and
+the audio arrives — and starts transcribing — when back in range.
+
+Metadata carries the recording id, start time, duration, and source. The id is generated on
+the Watch and reused as the `Recording` id, so a transfer the system retries and delivers
+twice is recognised instead of becoming a duplicate.
+
+The inbox file must be moved **synchronously** inside `didReceive` — it is deleted as soon
+as that method returns, so hopping to the main actor first would race the deletion and lose
+the recording. The Watch's copy is deleted only once the transfer is confirmed delivered.
+
+`RecordingFormat` is shared by both targets so Watch and phone audio are byte-format
+identical. Everything downstream — transcription, upload chunking, redaction's re-encode —
+was written against those values, and a Watch file that quietly differed in sample rate
+would misbehave far later in the pipeline.
+
+### Known limitation
+
+**Recording may stop when the wrist drops.** watchOS suspends apps that stop being
+frontmost; `WKExtendedRuntimeSession` lists `ResignedFrontmost` as an invalidation reason.
+The `audio` background mode is declared, which is the mechanism to try, but how far it
+actually gets is not something the SDK settles — it needs testing on a real Watch. If it
+proves insufficient, the usual workaround is holding a workout session to keep the app
+alive, at the cost of a HealthKit permission and a workout appearing in Fitness.
+
+## Explicitly out of scope for v1
 - Dedicated STT providers with true acoustic diarization (Deepgram, AssemblyAI). The
   `TranscriptionProvider` seam is what would make adding one cheap if inferred speaker
   labels prove insufficient.

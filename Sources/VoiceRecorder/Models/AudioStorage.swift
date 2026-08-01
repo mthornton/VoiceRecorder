@@ -16,7 +16,7 @@ enum AudioStorage {
     }()
 
     static func fileName(for id: UUID) -> String {
-        "\(id.uuidString).m4a"
+        "\(id.uuidString).\(RecordingFormat.fileExtension)"
     }
 
     static func url(forFileName name: String) -> URL {
