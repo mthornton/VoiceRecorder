@@ -15,9 +15,9 @@ final class SettingsStore {
 
     private let defaults: UserDefaults
 
-    var apiKey: String {
-        didSet { KeychainStore.save(apiKey) }
-    }
+    /// Read-only from outside: changing it goes through `setAPIKey`, which can
+    /// fail. A settable property would have to swallow that failure.
+    private(set) var apiKey: String
 
     var modelID: String {
         didSet { defaults.set(modelID, forKey: Keys.modelID) }
@@ -53,6 +53,22 @@ final class SettingsStore {
         self.speakerAwareTranscription = defaults.object(forKey: Keys.speakerAware) as? Bool ?? true
         self.transcriptionModelID = defaults.string(forKey: Keys.transcriptionModelID)
             ?? CuratedTranscriptionModel.defaultID
+    }
+
+    /// Persists the key, then updates the in-memory copy.
+    ///
+    /// The order matters. Updating memory first and writing in the background
+    /// means a rejected Keychain write leaves the app working for the rest of
+    /// the session and silently keyless on next launch. Writing first means the
+    /// two can never disagree, and a failure is something the caller must handle.
+    func setAPIKey(_ value: String) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try KeychainStore.delete()
+        } else {
+            try KeychainStore.save(trimmed)
+        }
+        apiKey = trimmed
     }
 
     var hasAPIKey: Bool {

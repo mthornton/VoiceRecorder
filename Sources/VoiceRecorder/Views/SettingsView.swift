@@ -12,6 +12,8 @@ struct SettingsView: View {
     private enum Validation: Equatable {
         case idle
         case checking
+        /// Written to the Keychain, but not checked against OpenRouter.
+        case saved
         case valid(String?)
         case invalid(String)
     }
@@ -76,9 +78,13 @@ struct SettingsView: View {
 
             if settings.hasAPIKey {
                 Button("Remove Key", role: .destructive) {
-                    settings.apiKey = ""
-                    keyDraft = ""
-                    validation = .idle
+                    do {
+                        try settings.setAPIKey("")
+                        keyDraft = ""
+                        validation = .idle
+                    } catch {
+                        validation = .invalid(error.localizedDescription)
+                    }
                 }
             }
         } header: {
@@ -99,6 +105,10 @@ struct SettingsView: View {
                 Text("Checking with OpenRouter…").foregroundStyle(.secondary)
             }
             .font(.caption)
+        case .saved:
+            Label("Key saved. Tap Test Key to check it works.", systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .valid(let label):
             Label(
                 label.map { "Key is valid (\($0))" } ?? "Key is valid",
@@ -255,7 +265,13 @@ struct SettingsView: View {
     // MARK: - Actions
 
     private func save() {
-        settings.apiKey = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try settings.setAPIKey(keyDraft)
+            // Saved is not the same as working, so don't imply it was validated.
+            validation = .saved
+        } catch {
+            validation = .invalid(error.localizedDescription)
+        }
     }
 
     private func test() {
@@ -266,9 +282,10 @@ struct SettingsView: View {
         Task {
             do {
                 let label = try await OpenRouterClient().validate(apiKey: candidate)
+                // Only persist a key we've confirmed works — and only report
+                // success if storing it actually succeeded too.
+                try settings.setAPIKey(candidate)
                 validation = .valid(label)
-                // Only persist a key we've confirmed works.
-                settings.apiKey = candidate
             } catch {
                 validation = .invalid(error.localizedDescription)
             }
